@@ -1,11 +1,20 @@
-FROM teamserverless/license-check:0.3.6 as license-check
+FROM teamserverless/license-check:0.3.9 as license-check
 
-FROM golang:1.13 as build
-ARG GO111MODULE=off
-ARG CGO_ENABLED=0
+FROM --platform=${BUILDPLATFORM:-linux/amd64} golang:1.13 as build
+
+ARG TARGETPLATFORM
+ARG BUILDPLATFORM
+ARG TARGETOS
+ARG TARGETARCH
+
+ARG VERSION="dev"
+ARG GIT_COMMIT="000000"
+
+ENV CGO_ENABLED=0
+ENV GO111MODULE=on
+ENV GOFLAGS=-mod=vendor
+
 COPY --from=license-check /license-check /usr/bin/
-
-RUN mkdir -p /go/src/github.com/openfaas/faas-swarm/
 
 WORKDIR /go/src/github.com/openfaas/faas-swarm
 
@@ -15,17 +24,15 @@ RUN license-check -path /go/src/github.com/openfaas/faas-swarm/ --verbose=false 
 
 RUN gofmt -l -d $(find . -type f -name '*.go' -not -path "./vendor/*")
 
-RUN CGO_ENABLED=$CGO_ENABLED go test $(go list ./... | grep -v /vendor/) -cover
+RUN CGO_ENABLED=${CGO_ENABLED} GOOS=${TARGETOS} GOARCH=${TARGETARCH} go test -v ./...
 
-RUN VERSION=$(git describe --all --exact-match `git rev-parse HEAD` | grep tags | sed 's/tags\///') \
-    && GIT_COMMIT=$(git rev-list -1 HEAD) \
-    && CGO_ENABLED=$CGO_ENABLED GOOS=linux go build --ldflags "-s -w \
+RUN GOOS=${TARGETOS} GOARCH=${TARGETARCH} CGO_ENABLED=${CGO_ENABLED} go build \
+    --ldflags "-s -w \
     -X github.com/openfaas/faas-swarm/version.GitCommit=${GIT_COMMIT}\
     -X github.com/openfaas/faas-swarm/version.Version=${VERSION}" \
     -a -installsuffix cgo -o faas-swarm .
 
-FROM alpine:3.12 as ship
-
+FROM --platform=${TARGETPLATFORM:-linux/amd64} alpine:3.12 as ship
 LABEL org.label-schema.license="MIT" \
       org.label-schema.vcs-url="https://github.com/openfaas/faas-swarm" \
       org.label-schema.vcs-type="Git" \
@@ -33,7 +40,8 @@ LABEL org.label-schema.license="MIT" \
       org.label-schema.vendor="openfaas" \
       org.label-schema.docker.schema-version="1.0"
 
-RUN apk --no-cache add ca-certificates
+RUN apk --no-cache add \
+    ca-certificates
 
 WORKDIR /root/
 
