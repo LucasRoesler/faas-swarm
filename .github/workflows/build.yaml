@@ -1,0 +1,83 @@
+name: build
+
+on:
+  push:
+    branches: [ '*' ]
+  pull_request:
+    branches: [ '*' ]
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        go-version: [1.13.x]
+        os: [ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@master
+      - name: Install Go
+        uses: actions/setup-go@v2
+        with:
+          go-version: ${{ matrix.go-version }}
+      - name: Get Owner name
+        id: get_owner_name
+        run: echo ::set-output name=OWNER_NAME::$(echo "$GITHUB_REPOSITORY" | awk -F / '{print tolower($1)}' | sed -e "s/:refs//")
+      - name: Get Repository name
+        id: get_repo_name
+        run: echo ::set-output name=REPOSITORY_NAME::$(echo "$GITHUB_REPOSITORY" | awk -F / '{print tolower($2)}' | sed -e "s/:refs//")
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v1
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v1
+      - name: Build x86_64 container into library
+        uses: docker/build-push-action@v2
+        with:
+          context: .
+          file: ./Dockerfile
+          push: false
+          platforms: linux/amd64
+          target: ship
+          build-args: |
+            VERSION=${{ steps.get_tag.outputs.TAG }}
+            GIT_COMMIT=${{ github.sha }}
+            REPO_URL=https://github.com/${{ env.USER_REPO }}
+          load: true
+          # note that the image tags for build/test need to match the value in the contrib/docker-compose.yml
+          tags: ghcr.io/openfaas/faas-swarm:latest-dev
+      - name: Install faas-cli
+        run: ./contrib/get_tools.sh
+      - name: Init Swarm
+        run: docker swarm init
+      - name: Deploy OpenFaaS
+        run: cd contrib && docker stack deploy func --compose-file docker-compose.yml
+        env:
+          BASIC_AUTH: "false"
+      - name: Wait for startup to finish
+        run : sleep 15
+      - name: Debug service state
+        run: docker service ps func_faas-swarm func_gateway
+      - name: Debug service logs
+        run: docker service logs func_faas-swarm
+      - name: Debug gateway logs
+        run: docker service logs func_gateway
+      - name: Authenticate faas-cli
+        run: cd contrib && cat ci-auth-pass.txt | faas-cli login --username admin --password-stdin
+      - name: Deploy function
+        run: faas-cli deploy --image=functions/alpine:latest --fprocess=cat --name "echo"
+      - name: Verify deployment
+        run: ./contrib/ci-verify-fnc-deployment.sh
+      - name: Test invoke the function
+        run: faas-cli invoke echo <<< "foobar" | grep "foobar"
+      - name: Remove the function
+        run: faas-cli rm echo
+      - name: Stop test cluster
+        run: docker stack rm func
+      - name: Build multi-arch containers for validation only
+        uses: docker/build-push-action@v2
+        with:
+          context: .
+          file: ./Dockerfile
+          outputs: "type=image,push=false"
+          platforms: linux/amd64,linux/arm/v7,linux/arm64
+          tags: ghcr.io/openfaas/faas-swarm:${{ github.sha }}
+
